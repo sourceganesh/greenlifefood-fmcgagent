@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [{
+         "name": "Python: Streamlit",
+         "type": "python",
+         "request": "launch",
+         "justMyCode": true,
+         "program": "${workspaceFolder}/venv/bin/streamlit",
+         "env": {
+             "STREAMLIT_APP": "finalapp.py",
+             "STREAMLIT_ENV": "development",
+         },
+         "args": [
+             "run",
+             "${workspaceFolder}/finalapp.py"
+         ],
+         "jinja": true
+     }
+    ]
+ }
