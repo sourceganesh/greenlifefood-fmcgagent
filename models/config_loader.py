@@ -9,7 +9,7 @@ class ConfigLoader:
         self.config_dir = Path(config_dir)
         self.configs = {}
         
-        self.config_dir.mkdir(exist_ok=True) # If a directory doesn't exist, we should error out imo, why are we making one? Our app depends on the contents of the directory
+        self.config_dir.mkdir(exist_ok=True) # If a directory doesn't exist, we should error out imo, why are we making one? The app depends on the contents of the directory
 
     def load_all_configs(self):
         """Load all configuration files from the config directory."""

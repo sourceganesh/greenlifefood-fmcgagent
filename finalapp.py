@@ -57,13 +57,12 @@ class ChatBot:
             tool_name = tool_call.function.name
             tool_args = json.loads(tool_call.function.arguments)
             
-            for tool in self.tools:
-                if tool["function"]["name"] == tool_name:
-                    tool_function = getattr(tool_functions, tool_name, None)
-                    if callable(tool_function):
-                        tool_responses.append(tool_function(**tool_args))
-                    else:
-                        tool_responses.append(f"Tool {tool_name} is not implemented.")
+            if tool_name in self.tools:
+                tool_function = getattr(tool_functions, tool_name, None)
+                if callable(tool_function):
+                    tool_responses.append(tool_function(**tool_args))
+                else:
+                    tool_responses.append(f"Tool {tool_name} is not implemented.")
         
         return "\n".join(tool_responses) if tool_responses else "Tool execution complete."
 
