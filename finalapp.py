@@ -249,19 +249,23 @@ Respond naturally to the user's message. Do not expose technical details or func
             context_manager.update_context("last_message", user_message)
             context_manager.update_context("last_response", response)
             
-            # Parse LLM response for any actions (add to cart, remove from cart, etc.)
-            self._handle_actions(response)
+            # Detect and execute any tool-based actions based on the user's message
+            action_result = self._handle_actions(user_message)
             
+            # If tool actions produced a user-friendly result, append it to the model response
+            if action_result:
+                response = f"{response}\n\n{action_result}"
+
             return response
 
         except Exception as e:
             logging.error(f"Error processing message: {str(e)}")
             return "I apologize, but I'm having trouble processing your request. Please try again."
 
-    def _handle_actions(self, response: str):
-        """Handle any actions indicated in the LLM response using tool calls"""
+    def _handle_actions(self, user_message: str):
+        """Detect and execute tool calls derived from the user's message"""
         try:
-            # First ask LLM to analyze the response with system prompts
+            # Ask LLM to analyze the user's message and propose tool calls in XML
             tool_selection = self.client.chat.completions.create(
                 model=self.model_config["model"],
                 messages=[
@@ -285,7 +289,7 @@ Respond naturally to the user's message. Do not expose technical details or func
                         Return tool calls in XML format:
                         <tool>tool_name</tool><arguments>{{json args}}</arguments>"""
                     },
-                    {"role": "user", "content": response}
+                    {"role": "user", "content": user_message}
                 ],
                 temperature=0,
                 max_tokens=self.model_config["max_tokens"]
@@ -298,41 +302,20 @@ Respond naturally to the user's message. Do not expose technical details or func
             results = []
             for tool_call in tool_calls:
                 try:
-                    # Let LLM handle the tool execution with system prompts
-                    execution_response = self.client.chat.completions.create(
-                        model=self.model_config["model"],
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": f"""{self.system_prompts['base_prompt']}
-                                
-                                Current context: {self._create_context()}
-                                Product format: {self.system_prompts['product_format']}
-                                Cart format: {self.system_prompts['cart_format']}
-                                
-                                Handle the execution of tool: {tool_call["tool_name"]}
-                                with arguments: {json.dumps(tool_call["arguments"])}
-                                
-                                If this is a cart operation, ensure:
-                                1. Prices match the product catalog exactly
-                                2. Totals are calculated as price × quantity
-                                3. Cart summary follows the cart_format template"""
-                            }
-                        ],
-                        temperature=0
-                    )
-                    results.append(execution_response.choices[0].message.content)
-                    
+                    tool_name = tool_call.get("tool_name")
+                    args = tool_call.get("arguments", {})
+                    result_msg = self._execute_tool(tool_name, args)
+                    if result_msg:
+                        results.append(result_msg)
                     # Update context with action
                     context_manager.update_context("last_action", {
-                        "tool": tool_call["tool_name"],
-                        "arguments": tool_call["arguments"],
-                        "result": results[-1]
+                        "tool": tool_name,
+                        "arguments": args,
+                        "result": result_msg
                     })
-                    
                 except Exception as e:
                     error_msg = self.system_prompts["error_messages"]["general"]
-                    logging.error(f"Error executing tool {tool_call['tool_name']}: {str(e)}")
+                    logging.error(f"Error executing tool {tool_call.get('tool_name')}: {str(e)}")
                     results.append(error_msg)
             
             # Update memory with cart state
@@ -342,6 +325,120 @@ Respond naturally to the user's message. Do not expose technical details or func
                 
         except Exception as e:
             logging.error(f"Error in tool calling: {str(e)}")
+            return self.system_prompts["error_messages"]["general"]
+
+    def _execute_tool(self, tool_name: str, args: Dict) -> Optional[str]:
+        """Map tool names to concrete operations and return user-friendly messages"""
+        try:
+            if tool_name == "get_product_info":
+                category = args.get("category")
+                return self._tool_get_product_info(category)
+            elif tool_name == "add_to_cart":
+                product_name = args.get("product_name")
+                quantity = int(args.get("quantity", 0))
+                return self._tool_add_to_cart(product_name, quantity)
+            elif tool_name == "remove_from_cart":
+                product_name = args.get("product_name")
+                return self._tool_remove_from_cart(product_name)
+            elif tool_name == "get_cart_summary":
+                return self._tool_get_cart_summary()
+            elif tool_name == "checkout":
+                return self._tool_checkout()
+            else:
+                logging.warning(f"Unknown tool requested: {tool_name}")
+                return None
+        except Exception as e:
+            logging.error(f"Tool execution error for {tool_name}: {str(e)}")
+            return self.system_prompts["error_messages"]["general"]
+
+    def _tool_get_product_info(self, category: Optional[str]) -> str:
+        """Return formatted list of products, filtered by category if provided"""
+        products = (
+            self.product_catalog.get_products_by_category(category)
+            if category else self.product_catalog.get_all_products()
+        )
+        if not products:
+            return "No matching products found."
+        fmt = self.system_prompts.get("product_format", "• {name} - ₹{price}")
+        lines = []
+        for p in products:
+            line = fmt.format(
+                name=p.name,
+                description=p.description,
+                price=f"{p.price:.2f}",
+                unit_size=p.unit_size,
+                min_qty=p.min_order_quantity,
+            )
+            lines.append(line)
+        return "\n\n".join(lines)
+
+    def _find_product_by_name(self, product_name: str) -> Optional[Product]:
+        if not product_name:
+            return None
+        name_l = product_name.strip().lower()
+        for p in self.product_catalog.get_all_products():
+            if p.name.lower() == name_l:
+                return p
+        return None
+
+    def _tool_add_to_cart(self, product_name: Optional[str], quantity: int) -> str:
+        if not product_name or quantity <= 0:
+            return self.system_prompts["error_messages"]["general"]
+        product = self._find_product_by_name(product_name)
+        if not product:
+            return self.system_prompts["error_messages"]["product_not_found"]
+        try:
+            if quantity < product.min_order_quantity:
+                return self.system_prompts["error_messages"]["invalid_quantity"].format(
+                    min_quantity=product.min_order_quantity
+                )
+            if product.stock < quantity:
+                return self.system_prompts["error_messages"]["out_of_stock"].format(
+                    available=product.stock
+                )
+            self.cart_manager.add_item(product, quantity)
+            return f"Added {quantity} pack(s) of {product.name} to your cart.\n\n{self._tool_get_cart_summary()}"
+        except Exception as e:
+            logging.error(f"Add to cart error: {str(e)}")
+            return self.system_prompts["error_messages"]["general"]
+
+    def _tool_remove_from_cart(self, product_name: Optional[str]) -> str:
+        if not product_name:
+            return self.system_prompts["error_messages"]["general"]
+        product = self._find_product_by_name(product_name)
+        if not product:
+            return self.system_prompts["error_messages"]["product_not_found"]
+        try:
+            self.cart_manager.remove_item(product.id)
+            return f"Removed {product.name} from your cart.\n\n{self._tool_get_cart_summary()}"
+        except Exception as e:
+            logging.error(f"Remove from cart error: {str(e)}")
+            return self.system_prompts["error_messages"]["general"]
+
+    def _tool_get_cart_summary(self) -> str:
+        summary = self.cart_manager.get_cart_summary()
+        if not summary.get("items"):
+            return "Your cart is currently empty."
+        items_lines = []
+        for item in summary["items"]:
+            product = self.product_catalog.get_product(item["product_id"]) if hasattr(self.product_catalog, 'get_product') else None
+            name = product.name if product else item["product_id"]
+            items_lines.append(f"• {name}: {item['quantity']} pack(s) × ₹{item['unit_price']:.2f} = ₹{item['total_price']:.2f}")
+        items_str = "\n".join(items_lines)
+        return self.system_prompts["cart_format"].format(items=items_str, total=f"{summary['total']:.2f}")
+
+    def _tool_checkout(self) -> str:
+        summary = self.cart_manager.get_cart_summary()
+        if not summary.get("items"):
+            return "Your cart is empty. Add some products before checkout."
+        # Mark as checked out and clear cart
+        try:
+            self.cart_manager.cart.status = "checked_out"
+            total = summary["total"]
+            self.cart_manager.clear_cart()
+            return f"✅ Checkout complete! Your order total is ₹{total:.2f}."
+        except Exception as e:
+            logging.error(f"Checkout error: {str(e)}")
             return self.system_prompts["error_messages"]["general"]
 
 

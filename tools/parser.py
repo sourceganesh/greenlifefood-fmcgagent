@@ -8,8 +8,9 @@ def parse_tool_response(tool_response: str) -> list:
         return []
         
     tool_calls = []
-    pattern = r"<tool>(.*?)</tool><arguments>(.*?)</arguments>"
-    matches = re.findall(pattern, tool_response)
+    # Allow whitespace/newlines between tags and JSON with DOTALL
+    pattern = r"<tool>\s*(.*?)\s*</tool>\s*<arguments>\s*(.*?)\s*</arguments>"
+    matches = re.findall(pattern, tool_response, flags=re.DOTALL)
     
     for match in matches:
         try:
